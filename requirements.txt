@@ -1,0 +1,10 @@
+# 교재 공부 도우미 — 다른 컴퓨터에 설치할 때
+# python3 -m venv .venv
+# .venv/bin/python -m pip install -r requirements.txt
+# .venv/bin/streamlit run app.py
+
+streamlit==1.64.0
+pdfplumber==0.11.10
+openai==3.16.2
+python-dotenv==1.2.3
+httpx==0.28.1
