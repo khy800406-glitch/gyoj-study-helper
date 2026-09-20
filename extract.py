@@ -1,16 +1,22 @@
-"""학생 교재 PDF에서 텍스트를 추출한다. 스캔본은 OCR을 쓴다."""
+"""학생 교재 PDF에서 텍스트를 추출한다. 스캔본은 병렬 OCR을 쓴다."""
 
 from __future__ import annotations
 
-import io
+import os
 import re
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 import pypdfium2 as pdfium
 
 
 ProgressFn = Callable[[int, int, str], None]
+
+_OCR_SCALE = 1.2
+_OCR_CONFIG = "--oem 1 --psm 6 -c tessedit_do_invert=0"
+_OCR_LANG = "kor+eng"
+_OCR_WORKERS = max(1, min(os.cpu_count() or 4, 16))
 
 
 @dataclass(frozen=True)
@@ -52,40 +58,63 @@ def _extract_embedded(file_bytes: bytes, on_progress: ProgressFn | None) -> list
         pdf.close()
 
 
-def _ocr_pages(file_bytes: bytes, on_progress: ProgressFn | None) -> list[str]:
+def _is_mostly_scan(pages: list[str]) -> bool:
+    sample = pages[:3] if len(pages) <= 3 else pages[:2] + pages[-1:]
+    chars = sum(len(re.sub(r"\s+", "", p)) for p in sample)
+    return chars < 40
+
+
+def _ocr_one(image, lang: str, config: str) -> str:
     import pytesseract
 
+    return pytesseract.image_to_string(image, lang=lang, config=config) or ""
+
+
+def _ocr_pages(file_bytes: bytes, on_progress: ProgressFn | None) -> list[str]:
     pdf = pdfium.PdfDocument(file_bytes)
     try:
         total = len(pdf)
-        pages: list[str] = []
+        images = []
         for index in range(total):
             if on_progress:
-                on_progress(index + 1, total, "스캔 글자 인식")
+                on_progress(index + 1, total, "페이지 준비")
             page = pdf[index]
-            bitmap = page.render(scale=1.8)
-            image = bitmap.to_pil()
-            raw = pytesseract.image_to_string(image, lang="kor+eng") or ""
+            bitmap = page.render(scale=_OCR_SCALE)
+            images.append(bitmap.to_pil().convert("L"))
             bitmap.close()
             page.close()
-            pages.append(_clean_page_text(raw))
-        return pages
     finally:
         pdf.close()
+
+    pages = [""] * total
+    done = 0
+    workers = min(_OCR_WORKERS, max(1, total))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(_ocr_one, images[i], _OCR_LANG, _OCR_CONFIG): i
+            for i in range(total)
+        }
+        for future in as_completed(futures):
+            index = futures[future]
+            pages[index] = _clean_page_text(future.result())
+            done += 1
+            if on_progress:
+                on_progress(done, total, "스캔 글자 인식")
+    return pages
 
 
 def extract_pdf(file_bytes: bytes, on_progress: ProgressFn | None = None) -> ExtractResult:
     if not file_bytes:
         raise ValueError("빈 파일입니다.")
 
-    used_ocr = False
     try:
         pages = _extract_embedded(file_bytes, on_progress)
     except Exception as exc:
         raise ValueError(f"PDF를 열지 못했습니다: {exc}") from exc
 
+    used_ocr = False
     joined = "\n\n".join(page for page in pages if page).strip()
-    if len(re.sub(r"\s+", "", joined)) < 80:
+    if _is_mostly_scan(pages):
         try:
             pages = _ocr_pages(file_bytes, on_progress)
             used_ocr = True
