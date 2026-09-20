@@ -208,13 +208,12 @@ elif result is not None:
         col1.metric("총 글자 수", f"{result.char_count:,}")
         col2.metric("공백 제외 글자 수", f"{result.char_count_no_space:,}")
         col3.metric("페이지 수", f"{result.page_count:,}")
-        if uploaded is not None:
-            st.download_button(
-                label="추출 텍스트 저장 (.txt)",
-                data=result.text.encode("utf-8"),
-                file_name=f"{uploaded.name.rsplit('.', 1)[0]}_추출.txt",
-                mime="text/plain; charset=utf-8",
-            )
+        st.download_button(
+            label="추출 텍스트 저장 (.txt)",
+            data=result.text.encode("utf-8"),
+            file_name="교재_추출.txt",
+            mime="text/plain; charset=utf-8",
+        )
 
 st.subheader("공부하기")
 with st.container(horizontal=True):
@@ -231,6 +230,19 @@ with st.container(horizontal=True):
         handle_request("요약 읽어줘")
         st.rerun()
 
+if st.session_state.speak_text:
+    st.subheader("읽어주기")
+    with st.container(border=True):
+        render_player(
+            st.session_state.speak_text,
+            st.session_state.speak_label or "읽어주기",
+            st.session_state.get("audio_bytes"),
+        )
+
+if st.session_state.summary:
+    with st.expander("요약본", expanded=True):
+        st.markdown(st.session_state.summary)
+
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
@@ -242,10 +254,6 @@ prompt = st.chat_input(
 if prompt:
     handle_request(prompt)
     st.rerun()
-
-if st.session_state.summary:
-    with st.expander("요약본", expanded=True):
-        st.markdown(st.session_state.summary)
 
 quiz = st.session_state.quiz
 if quiz:
@@ -309,14 +317,6 @@ if quiz:
         if st.button("새 퀴즈", icon=":material/refresh:"):
             handle_request("퀴즈 만들어줘")
             st.rerun()
-
-if st.session_state.speak_text:
-    st.subheader("읽어주기")
-    render_player(
-        st.session_state.speak_text,
-        st.session_state.speak_label or "읽어주기",
-        st.session_state.get("audio_bytes"),
-    )
 
 if has_textbook() and result is not None:
     with st.expander("추출된 텍스트", expanded=not st.session_state.messages):

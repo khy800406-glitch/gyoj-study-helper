@@ -42,10 +42,11 @@ def render_player(text: str, label: str, audio: bytes | None) -> None:
         return
     st.caption(label)
     if audio:
-        st.audio(audio, format="audio/mp3", autoplay=True)
+        st.audio(audio, format="audio/mp3", autoplay=False)
         if len(text) > _MAX_CHARS:
             st.caption("앞에서부터 읽습니다. 아래 추출된 텍스트에서 나머지를 볼 수 있습니다.")
         return
+    st.info("재생 막대가 아래에 있습니다. 재생 버튼을 누르세요.")
 
     payload = json.dumps(_clip(text), ensure_ascii=False)
     st.html(
