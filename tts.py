@@ -1,134 +1,84 @@
-"""브라우저에서 한국어로 교재를 읽어 준다."""
+"""교재 읽어주기: 실제 음성 파일 재생 + 브라우저 읽기."""
 
 from __future__ import annotations
 
+import io
 import json
+import re
+from html import escape
 
 import streamlit as st
 
 
-def render_player(text: str, label: str) -> None:
+_MAX_CHARS = 1_800
+
+
+def _clip(text: str) -> str:
+    clip = re.sub(r"\s+", " ", text).strip()
+    if len(clip) <= _MAX_CHARS:
+        return clip
+    head = clip[:_MAX_CHARS]
+    cut = max(head.rfind(". "), head.rfind("다. "), head.rfind("요. "), head.rfind(" "))
+    return head[: cut + 1].strip() if cut > 400 else head
+
+
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=16)
+def make_speech(text: str) -> bytes:
+    from gtts import gTTS
+
+    clip = _clip(text)
+    if not clip:
+        raise ValueError("읽을 글이 없습니다.")
+    buf = io.BytesIO()
+    gTTS(text=clip, lang="ko").write_to_fp(buf)
+    audio = buf.getvalue()
+    if len(audio) < 200:
+        raise RuntimeError("음성 파일을 만들지 못했습니다.")
+    return audio
+
+
+def render_player(text: str, label: str, audio: bytes | None) -> None:
     if not text.strip():
         return
-    payload = json.dumps(text, ensure_ascii=False)
-    title = json.dumps(label or "읽어주기", ensure_ascii=False)
-    st.iframe(
+    st.caption(label)
+    if audio:
+        st.audio(audio, format="audio/mp3", autoplay=True)
+        if len(text) > _MAX_CHARS:
+            st.caption("앞에서부터 읽습니다. 아래 추출된 텍스트에서 나머지를 볼 수 있습니다.")
+        return
+
+    payload = json.dumps(_clip(text), ensure_ascii=False)
+    st.html(
         f"""
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8" />
-<style>
-  body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }}
-  .bar {{
-    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-    padding: 8px 4px;
-  }}
-  button {{
-    border: 1px solid #ccc; background: #fff; border-radius: 8px;
-    padding: 6px 12px; cursor: pointer;
-  }}
-  button:hover {{ background: #f3f3f3; }}
-  .label {{ color: #444; font-size: 13px; }}
-  #status {{ color: #666; font-size: 12px; }}
-</style>
-</head>
-<body>
-  <div class="bar">
-    <span class="label" id="title"></span>
-    <button id="play">읽기</button>
-    <button id="pause">일시정지</button>
-    <button id="stop">정지</button>
-    <label class="label">속도
-      <input id="rate" type="range" min="0.7" max="1.3" step="0.05" value="0.95" />
-    </label>
-    <span id="status">대기</span>
-  </div>
+<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-family:sans-serif;">
+  <span>{escape(label or "읽어주기")}</span>
+  <button id="play">읽기</button>
+  <button id="pause">일시정지</button>
+  <button id="stop">정지</button>
+  <span id="status">대기</span>
+</div>
 <script>
 const text = {payload};
-const title = {title};
-document.getElementById("title").textContent = title;
-
-function chunks(src) {{
-  const lines = src.replace(/\\r/g, "").split(/\\n+/);
-  const out = [];
-  let buf = "";
-  for (const line of lines) {{
-    const piece = line.trim();
-    if (!piece) continue;
-    if ((buf + " " + piece).length > 360) {{
-      if (buf) out.push(buf);
-      if (piece.length > 360) {{
-        for (let i = 0; i < piece.length; i += 360) out.push(piece.slice(i, i + 360));
-        buf = "";
-      }} else {{
-        buf = piece;
-      }}
-    }} else {{
-      buf = buf ? buf + " " + piece : piece;
-    }}
-  }}
-  if (buf) out.push(buf);
-  return out.length ? out : [src];
-}}
-
-function koVoice() {{
-  const voices = window.speechSynthesis.getVoices();
-  return voices.find(v => v.lang && v.lang.toLowerCase().startsWith("ko")) || null;
-}}
-
-let queue = [];
-let idx = 0;
-let paused = false;
-
-function speakNext() {{
-  if (paused) return;
-  if (idx >= queue.length) {{
-    document.getElementById("status").textContent = "끝";
-    return;
-  }}
-  const u = new SpeechSynthesisUtterance(queue[idx]);
-  const voice = koVoice();
-  if (voice) u.voice = voice;
+function speak() {{
+  window.speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
   u.lang = "ko-KR";
-  u.rate = parseFloat(document.getElementById("rate").value);
-  u.onend = () => {{ idx += 1; speakNext(); }};
-  u.onerror = () => {{ idx += 1; speakNext(); }};
-  document.getElementById("status").textContent = "읽는 중 " + (idx + 1) + "/" + queue.length;
+  const v = window.speechSynthesis.getVoices().find(x => (x.lang||"").toLowerCase().startsWith("ko"));
+  if (v) u.voice = v;
+  u.onend = () => document.getElementById("status").textContent = "끝";
+  document.getElementById("status").textContent = "읽는 중";
   window.speechSynthesis.speak(u);
 }}
-
-document.getElementById("play").onclick = () => {{
-  window.speechSynthesis.cancel();
-  paused = false;
-  queue = chunks(text);
-  idx = 0;
-  const start = () => speakNext();
-  if (window.speechSynthesis.getVoices().length === 0) {{
-    window.speechSynthesis.onvoiceschanged = start;
-  }}
-  start();
-}};
+document.getElementById("play").onclick = speak;
 document.getElementById("pause").onclick = () => {{
-  if (window.speechSynthesis.speaking && !window.speechSynthesis.paused) {{
-    paused = true;
-    window.speechSynthesis.pause();
-    document.getElementById("status").textContent = "일시정지";
-  }} else if (window.speechSynthesis.paused) {{
-    paused = false;
-    window.speechSynthesis.resume();
-    document.getElementById("status").textContent = "읽는 중";
-  }}
+  if (window.speechSynthesis.paused) {{ window.speechSynthesis.resume(); }}
+  else {{ window.speechSynthesis.pause(); }}
 }};
 document.getElementById("stop").onclick = () => {{
-  paused = true;
   window.speechSynthesis.cancel();
   document.getElementById("status").textContent = "정지";
 }};
 </script>
-</body>
-</html>
 """,
-        height=72,
-        width="stretch",
+        unsafe_allow_javascript=True,
     )

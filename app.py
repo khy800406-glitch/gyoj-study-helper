@@ -12,7 +12,9 @@ from extract import extract_pdf
 from intent import classify, focus_question
 from quiz import grade_quiz, make_quiz
 from summarize import summarize_textbook
-from tts import render_player
+from tts import make_speech, render_player
+
+SAMPLE_PDF = Path(__file__).resolve().parent / "sample" / "sample.pdf"
 
 NEED_PDF = "먼저 상단의 교재 PDF 파일을 업로드해 주세요!"
 
@@ -38,6 +40,7 @@ def init_session() -> None:
     st.session_state.setdefault("quiz_nonce", 0)
     st.session_state.setdefault("result", None)
     st.session_state.setdefault("file_id", None)
+    st.session_state.setdefault("audio_bytes", None)
     if "api_key_input" not in st.session_state:
         st.session_state.api_key_input = _secret_api_key()
 
@@ -50,11 +53,31 @@ def reset_study_state() -> None:
     st.session_state.quiz = None
     st.session_state.quiz_grade = None
     st.session_state.quiz_nonce = 0
+    st.session_state.audio_bytes = None
 
 
 def has_textbook() -> bool:
     result = st.session_state.get("result")
     return bool(result is not None and getattr(result, "text", ""))
+
+
+def load_textbook(file_bytes: bytes) -> None:
+    file_id = hashlib.sha256(file_bytes).hexdigest()
+    if st.session_state.file_id == file_id and has_textbook():
+        return
+    reset_study_state()
+    st.session_state.file_id = file_id
+    with st.spinner("텍스트를 추출하는 중입니다. 교재가 길면 조금 걸릴 수 있습니다."):
+        st.session_state.result = extract_pdf(file_bytes)
+
+
+def prepare_audio(text: str) -> bytes | None:
+    try:
+        with st.spinner("목소리를 만드는 중입니다."):
+            return make_speech(text)
+    except Exception as exc:
+        st.warning(f"음성 파일을 만들지 못했습니다. 화면의 읽기 버튼을 눌러 주세요. ({exc})")
+        return None
 
 
 def run_summary(question: str | None) -> str:
@@ -86,12 +109,14 @@ def handle_request(message: str) -> None:
     if intent == "read":
         st.session_state.speak_text = result.text
         st.session_state.speak_label = "교재 전체"
-        reply = "교재를 읽어 드립니다. 아래 **읽기** 버튼을 누르세요. 일시정지·정지도 됩니다."
+        st.session_state.audio_bytes = prepare_audio(result.text)
+        reply = "아래에서 바로 재생됩니다. 재생이 안 되면 오디오의 재생 버튼을 누르세요."
     elif intent == "read_summary":
         text = st.session_state.summary or run_summary(focus_question(message))
         st.session_state.speak_text = text
         st.session_state.speak_label = "핵심 요약"
-        reply = "요약을 읽어 드립니다. 아래 **요약본**과 **읽기**를 확인하세요."
+        st.session_state.audio_bytes = prepare_audio(text)
+        reply = "요약 음성이 아래에 있습니다. 재생이 안 되면 오디오의 재생 버튼을 누르세요."
     elif intent == "quiz":
         with st.status(":shimmer[퀴즈를 만드는 중]", expanded=False) as status:
             quiz = make_quiz(
@@ -133,20 +158,25 @@ with st.sidebar:
     )
     st.caption("키는 이 컴퓨터에서만 쓰이며, 입력값은 파일로 저장하지 않습니다.")
 
-uploaded = st.file_uploader("학생 교재 PDF 파일", type=["pdf"])
-
-if uploaded is not None:
-    file_bytes = uploaded.getvalue()
-    file_id = hashlib.sha256(file_bytes).hexdigest()
-    if st.session_state.file_id != file_id:
-        reset_study_state()
-        st.session_state.file_id = file_id
+up_col, sample_col = st.columns([3, 1], vertical_alignment="bottom")
+with up_col:
+    uploaded = st.file_uploader("학생 교재 PDF 파일", type=["pdf"], key="textbook_pdf")
+with sample_col:
+    if SAMPLE_PDF.exists() and st.button("샘플 교재로 시험하기", width="stretch"):
         try:
-            with st.spinner("텍스트를 추출하는 중입니다. 교재가 길면 조금 걸릴 수 있습니다."):
-                st.session_state.result = extract_pdf(file_bytes)
+            load_textbook(SAMPLE_PDF.read_bytes())
         except Exception as exc:
             st.session_state.result = None
             st.warning(f"PDF를 읽지 못했습니다: {exc}")
+        else:
+            st.rerun()
+
+if uploaded is not None:
+    try:
+        load_textbook(uploaded.getvalue())
+    except Exception as exc:
+        st.session_state.result = None
+        st.warning(f"PDF를 읽지 못했습니다: {exc}")
 
 result = st.session_state.result
 
@@ -267,7 +297,11 @@ if quiz:
 
 if st.session_state.speak_text:
     st.subheader("읽어주기")
-    render_player(st.session_state.speak_text, st.session_state.speak_label or "읽어주기")
+    render_player(
+        st.session_state.speak_text,
+        st.session_state.speak_label or "읽어주기",
+        st.session_state.get("audio_bytes"),
+    )
 
 if has_textbook() and result is not None:
     with st.expander("추출된 텍스트", expanded=not st.session_state.messages):
