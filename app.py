@@ -63,12 +63,18 @@ def has_textbook() -> bool:
 
 def load_textbook(file_bytes: bytes) -> None:
     file_id = hashlib.sha256(file_bytes).hexdigest()
-    if st.session_state.file_id == file_id and has_textbook():
+    if st.session_state.file_id == file_id and st.session_state.get("result") is not None:
         return
     reset_study_state()
     st.session_state.file_id = file_id
-    with st.spinner("텍스트를 추출하는 중입니다. 교재가 길면 조금 걸릴 수 있습니다."):
-        st.session_state.result = extract_pdf(file_bytes)
+    size_mb = len(file_bytes) / (1024 * 1024)
+    with st.status(f"{size_mb:.1f}MB 교재를 읽는 중", expanded=True) as status:
+        def on_progress(done: int, total: int, stage: str) -> None:
+            status.write(f"{stage}: {done}/{total}")
+            status.update(label=f"{stage} ({done}/{total})")
+
+        st.session_state.result = extract_pdf(file_bytes, on_progress=on_progress)
+        status.update(label="교재 읽기 완료", state="complete")
 
 
 def prepare_audio(text: str) -> bytes | None:
@@ -142,13 +148,6 @@ def handle_request(message: str) -> None:
 
 init_session()
 
-if SAMPLE_PDF.exists() and str(st.query_params.get("sample", "")) == "1":
-    try:
-        load_textbook(SAMPLE_PDF.read_bytes())
-    except Exception as exc:
-        st.session_state.result = None
-        st.warning(f"PDF를 읽지 못했습니다: {exc}")
-
 st.title("교재 공부 도우미")
 st.caption(
     "PDF를 올리면 텍스트를 추출합니다. 긴 교재는 2,000~3,000자씩 나눠 요약한 뒤 "
@@ -184,6 +183,12 @@ if uploaded is not None:
     except Exception as exc:
         st.session_state.result = None
         st.warning(f"PDF를 읽지 못했습니다: {exc}")
+elif SAMPLE_PDF.exists() and str(st.query_params.get("sample", "")) == "1":
+    try:
+        load_textbook(SAMPLE_PDF.read_bytes())
+    except Exception as exc:
+        st.session_state.result = None
+        st.warning(f"PDF를 읽지 못했습니다: {exc}")
 
 _action = str(st.query_params.get("action", ""))
 if _action == "read" and has_textbook() and not st.session_state.speak_text:
@@ -195,15 +200,14 @@ elif _action == "summary" and has_textbook() and not st.session_state.summary:
 
 result = st.session_state.result
 
-if not has_textbook():
+if result is None and uploaded is None:
     st.info(NEED_PDF)
+elif result is not None and not result.text:
+    st.warning(
+        "이 PDF는 사진 스캔본이라 글자가 바로 잡히지 않았습니다. "
+        "페이지를 이미지로 읽어 글자를 인식하는 중입니다. 실패하면 선명한 스캔본을 올려 주세요."
+    )
 elif result is not None:
-    if not result.text:
-        st.warning(
-            "추출된 텍스트가 없습니다. 사진으로 찍은 스캔본이거나 이미지 PDF일 수 있습니다. "
-            "글자가 선택되는 디지털 PDF인지 확인해 주세요."
-        )
-    else:
         col1, col2, col3 = st.columns(3)
         col1.metric("총 글자 수", f"{result.char_count:,}")
         col2.metric("공백 제외 글자 수", f"{result.char_count_no_space:,}")
